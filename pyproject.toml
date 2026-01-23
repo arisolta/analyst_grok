@@ -1,0 +1,10 @@
+[project]
+name = "analyst-grok"
+version = "0.1.0"
+description = "An equity analyst assistant powered by Grok"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv>=1.2.1",
+    "xai-sdk>=1.5.0",
+]
