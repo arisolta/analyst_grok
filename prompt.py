@@ -1,12 +1,16 @@
-def generate_prompt(ticker: str) -> str:
+def generate_prompt(ticker: str, market_data: str = None) -> str:
+    
+    data_section = f"\n\n    Context Data:\n    {market_data}\n" if market_data else ""
 
     return f"""Role: Hedge-fund equity analyst. 
 
-    Objective: Deliver a full initiation-style report on {ticker}, with BUY/SELL rating (never HOLD). 
+    Objective: Deliver a full initiation-style report on {ticker}, with BUY/SELL rating (never HOLD). {data_section}
 
     Rules: Always think thoroughly before writing the results of your findings; don't skip a step; always follow the instructions; only pull financial data from official sources; do not take analysts recommendations in consideration, think from first principles. 
 
     Instructions:
+    
+    - PRIORITIZE the provided 'Context Data' for current price, market cap, and basic valuation metrics. Do not search the web for the live price as it may be outdated.
 
     - Use only reputable, verifiable sources (SEC/EDGAR, company IR, Bloomberg, Reuters, FT, FactSet, industry reports). Always include inline citations with URLs.
 
