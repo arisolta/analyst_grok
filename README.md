@@ -35,7 +35,7 @@ Run the application:
 uv run main.py
 ```
 
-When prompted, enter a stock ticker symbol (e.g., AAPL) or company name. The application will generate a comprehensive equity analyst report and save it as a timestamped `.txt` file.
+When prompted, enter a stock ticker symbol (e.g., AAPL) - be mindful to adjust for non-US stocks by adding the exchange (e.g., BP.L or SAP.DE). The application will generate a comprehensive equity analyst report and save it as a timestamped `.txt` file.
 
 ## Requirements
 
