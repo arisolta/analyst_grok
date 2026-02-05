@@ -122,7 +122,7 @@ class Editor:
     def __init__(self, ticker):
         self.ticker = ticker
 
-    def run(self, sections: dict) -> str:
+    def run(self, sections: dict, date_str: str = "N/A") -> str:
         # Combine all sections
         full_content = ""
         for title, content in sections.items():
@@ -130,7 +130,8 @@ class Editor:
             
         prompt = EDITOR_PROMPT.format(
             ticker=self.ticker,
-            full_content=full_content
+            full_content=full_content,
+            date=date_str
         )
         
         return query_llm(

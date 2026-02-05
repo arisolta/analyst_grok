@@ -75,6 +75,7 @@ Output:
 EDITOR_PROMPT = """
 Role: Chief Editor of an Equity Research Firm.
 Objective: Compile and polish the final report for {ticker}.
+Report Date: {date}
 
 Content to Assemble:
 {full_content}

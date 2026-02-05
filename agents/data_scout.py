@@ -1,7 +1,9 @@
 import yfinance as yf
 import logging
+import re
 from datetime import datetime
 from agents.utils import query_llm
+from xai_sdk.tools import web_search
 
 logger = logging.getLogger(__name__)
 
@@ -102,39 +104,89 @@ class DataScout:
             logger.error(f"Error fetching news: {e}")
             return []
 
-    def identify_peers(self) -> list:
-        """Identifies 3 major competitors using LLM."""
+    def identify_peers(self, sector: str = "N/A", industry: str = "N/A") -> list:
+        """Identifies a pool of potential competitors using reasoning and web search."""
         logger.info(f"Identifying peers for {self.ticker}...")
+        company_name = self.stock.info.get('longName') or self.ticker
         try:
-            prompt = f"Identify the top 3 public competitors for {self.ticker}. Return ONLY the 3 ticker symbols separated by commas (e.g., 'AMD, INTC, QCOM'). Do not add any text."
-            response = query_llm(
-                system_prompt="You are a financial data assistant.",
-                user_prompt=prompt,
-                model="grok-4-1-fast-non-reasoning"
+            prompt = (
+                f"I need to find the top 5 direct public competitors for {company_name} ({self.ticker}). "
+                f"Sector: {sector}, Industry: {industry}. "
+                f"\n\nCRITICAL INSTRUCTIONS:\n"
+                f"1. Use web search to verify who the actual business competitors are. "
+                f"2. For each competitor, find their PRIMARY Yahoo Finance ticker symbol. "
+                f"3. Strictly use primary listings (e.g., 'BN.PA' for Danone, 'SPOT' for Spotify, 'OR.PA' for L'Oreal). "
+                f"4. Exclude {company_name} itself and all its ADRs or secondary listings. "
+                f"\nReturn ONLY a comma-separated list of the 5 ticker symbols. No extra text."
             )
-            peers = [t.strip().upper() for t in response.split(",") if t.strip()]
-            return peers[:3] # Ensure max 3
+            response = query_llm(
+                system_prompt="You are a senior equity research analyst. Use web search to identify accurate primary-listing tickers for direct competitors.",
+                user_prompt=prompt,
+                model="grok-4-1-fast-reasoning",
+                tools=[web_search()]
+            )
+            
+            # Extract tickers using regex to handle any potential conversational filler
+            # Matches words that might have dots or hyphens (typical of tickers)
+            found = re.findall(r'([A-Z0-9^.-]+)', response)
+            peers = [t.strip().upper() for t in found if t.strip()]
+            
+            # Deduplicate while preserving order
+            seen = set()
+            unique_peers = [p for p in peers if not (p in seen or seen.add(p))]
+            
+            return unique_peers[:6] # Return up to 6 candidates for filtering
         except Exception as e:
             logger.error(f"Error identifying peers: {e}")
             return []
 
-    def get_peer_data(self) -> dict:
-        """Fetches key metrics for competitors."""
-        peers = self.identify_peers()
+    def get_peer_data(self, sector: str = "N/A", industry: str = "N/A") -> dict:
+        """Fetches key metrics for competitors and filters for the best industry matches."""
+        candidates = self.identify_peers(sector, industry)
         peer_data = {}
         
-        for peer in peers:
+        for peer in candidates:
+            if len(peer_data) >= 3:
+                break
+                
             logger.info(f"Scouting peer data for {peer}...")
             try:
                 p_stock = yf.Ticker(peer)
                 info = p_stock.info
+                
+                # 1. Basic Validity Check
+                price = info.get('currentPrice') or info.get('regularMarketPrice')
+                if not price:
+                    logger.warning(f"Peer {peer} has no price data, skipping.")
+                    continue
+
+                # 2. Industry/Sector Filtering
+                p_sector = info.get('sector', 'N/A')
+                p_industry = info.get('industry', 'N/A')
+                
+                # Check for same company (sometimes LLM fails to filter)
+                target_name = self.stock.info.get('longName')
+                peer_name = info.get('longName')
+                if peer_name and target_name and peer_name == target_name:
+                    logger.warning(f"Peer {peer} is actually the same company ({peer_name}). Skipping.")
+                    continue
+
+                # Be somewhat flexible but avoid completely unrelated sectors
+                # If we have a sector match, it's a strong candidate
+                if sector != "N/A" and p_sector != "N/A" and sector != p_sector:
+                    # Special handling for conglomerates or very close sectors might go here
+                    # For now, we skip to avoid outliers like UMG vs Sixt
+                    logger.warning(f"Peer {peer} sector '{p_sector}' mismatch with '{sector}'. Skipping.")
+                    continue
+
                 peer_data[peer] = {
-                    "price": info.get('currentPrice') or info.get('regularMarketPrice', 'N/A'),
+                    "price": price,
                     "market_cap": info.get('marketCap', 'N/A'),
                     "pe_ratio": info.get('trailingPE', 'N/A'),
                     "fwd_pe": info.get('forwardPE', 'N/A'),
                     "revenue_growth": info.get('revenueGrowth', 'N/A'),
-                    "profit_margins": info.get('profitMargins', 'N/A')
+                    "profit_margins": info.get('profitMargins', 'N/A'),
+                    "company_name": info.get('longName') or peer
                 }
             except Exception as e:
                 logger.warning(f"Failed to fetch data for peer {peer}: {e}")
@@ -143,9 +195,20 @@ class DataScout:
 
     def gather_all(self) -> dict:
         """Coordinates the data gathering."""
+        market_data = self.get_market_data()
+        
+        # If we can't get basic market data, don't bother with the rest
+        if "error" in market_data:
+            return {
+                "market_data": market_data,
+                "financials": {},
+                "news": [],
+                "peer_data": {}
+            }
+
         return {
-            "market_data": self.get_market_data(),
+            "market_data": market_data,
             "financials": self.get_financials(),
             "news": self.get_news(),
-            "peer_data": self.get_peer_data()
+            "peer_data": self.get_peer_data(market_data.get('sector'), market_data.get('industry'))
         }
