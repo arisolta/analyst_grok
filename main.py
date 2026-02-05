@@ -1,154 +1,116 @@
 import os
 import json
-import re
 import logging
+import argparse
 from pathlib import Path
 from datetime import datetime
-
-import yfinance as yf
 import requests_cache
+
 from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from xai_sdk import Client
-from xai_sdk.chat import user, system
-from xai_sdk.tools import web_search
-from prompt import generate_prompt
+from agents.data_scout import DataScout
+from agents.workers import FundamentalAnalyst, SentimentAnalyst, PortfolioManager, Editor
 
-# --- Configuration & Setup ---
+# --- Configuration ---
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("Orchestrator")
 
-# Item 9: Path Handling - Use absolute paths
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BASE_DIR / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = BASE_DIR / ".cache"
 
-# Item 7: Dependency Stability - yfinance Caching
-# Install a cache for requests (used by yfinance) to prevent rate limiting on repeated runs
+# Enable caching for yfinance
 requests_cache.install_cache(str(CACHE_DIR / "yfinance_cache"), expire_after=3600)
 
-# Configure Logging (Part of robustness, replacing simple prints where appropriate or adding structure)
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
-
-# --- Helper Functions ---
-
 def sanitize_filename(name: str) -> str:
-    """Item 5: Output Management - Safe Filenames"""
-    # Remove characters that are unsafe for filenames
+    import re
     return re.sub(r'[^\w\-\.]', '_', name)
 
-# Item 2: Enhanced Error Handling & Retries
-# Retry on any Exception for demonstration, but ideally should be specific API connection errors.
-# We'll rely on the SDK raising exceptions for network issues.
-@retry(
-    stop=stop_after_attempt(3), 
-    wait=wait_exponential(multiplier=1, min=4, max=10),
-    reraise=True
-)
-def generate_report_with_retry(chat_interface):
-    logger.info("Requesting report generation from Grok...")
-    return chat_interface.sample()
-
 def main():
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Input
-    ticker = input("Enter a stock ticker symbol (e.g., AAPL, SAP.DE, BP.L): ").strip().upper()
+    parser = argparse.ArgumentParser(description="Multi-Agent AI Equity Analyst")
+    parser.add_argument("ticker", nargs="?", help="Stock ticker symbol (e.g., AAPL)")
+    args = parser.parse_args()
+
+    # handle interactive mode if no arg provided
+    if args.ticker:
+        ticker = args.ticker.strip().upper()
+    else:
+        ticker = input("Enter a stock ticker symbol (e.g., AAPL): ").strip().upper()
+
     if not ticker:
         logger.error("No ticker provided. Exiting.")
         return
 
-    # Fetch market data via yfinance
-    market_data_str = None
-    try:
-        logger.info(f"Fetching real-time data for {ticker} via yfinance...")
-        stock = yf.Ticker(ticker)
-        # Accessing info triggers the fetch
-        info = stock.info
-        
-        # Check if we got valid data
-        if info and ('regularMarketPrice' in info or 'currentPrice' in info):
-            price = info.get('currentPrice') or info.get('regularMarketPrice')
-            currency = info.get('currency', 'USD')
-            mkt_cap = info.get('marketCap', 'N/A')
-            pe_ratio = info.get('trailingPE', 'N/A')
-            fwd_pe = info.get('forwardPE', 'N/A')
-            company_name = info.get('longName') or info.get('shortName') or ticker
-
-            market_data_str = f"""
-                [VERIFIED REAL-TIME MARKET DATA - {today}]
-                Company Name: {company_name}
-                Current Price: {price} {currency}
-                Market Cap: {mkt_cap}
-                Trailing P/E: {pe_ratio}
-                Forward P/E: {fwd_pe}
-                52 Week High: {info.get('fiftyTwoWeekHigh', 'N/A')}
-                52 Week Low: {info.get('fiftyTwoWeekLow', 'N/A')}
-                """
-            logger.info(f"Found: {company_name} | Price: {price} {currency}")
-
-        else:
-            logger.warning("Could not retrieve detailed market data (ticker might be invalid or data unavailable).")
+    start_time = datetime.now()
+    timestamp_str = start_time.strftime("%Y-%m-%d_%H-%M-%S")
     
-    except Exception as e:
-        # Item 2: Enhanced Error Handling - Graceful Degradation
-        logger.warning(f"yfinance fetch failed: {e}")
-        logger.warning("Proceeding with web-only search. The report will rely on the AI's web search capabilities.")
-
-    # Prepare Prompt & Client
-    prompt = generate_prompt(ticker, market_data=market_data_str)
-    
-    api_key = os.getenv("XAI_API_KEY")
-    if not api_key:
-        logger.critical("XAI_API_KEY not found in environment variables.")
-        return
+    logger.info(f"Starting analysis for {ticker}...")
 
     try:
-        client = Client(
-            api_key=api_key,
-            timeout=3600,  # Override default timeout for reasoning models
-        )
-        chat = client.chat.create(
-            model="grok-4-1-fast-reasoning",
-            tools=[web_search()]
-        )
-        chat.append(system(f"You are Grok, a highly intelligent hedge fund analyst. You're aware that today is {today}."))
-        chat.append(user(prompt))
+        # 1. Data Scout
+        logger.info("--- Step 1: Data Scout ---")
+        scout = DataScout(ticker)
+        raw_data = scout.gather_all()
         
-        # Execute with Retry logic
-        response = generate_report_with_retry(chat)
+        if "error" in raw_data['market_data']:
+             logger.warning(f"Data Scout reported issues: {raw_data['market_data']['error']}")
         
-        logger.info("REPORT COMPLETED. SAVING TO FILE...")
-
-        # Item 5: Output Management - Metadata & Safe Filenames
-        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # 2. Fundamental Analysis
+        logger.info("--- Step 2: Fundamental Analyst ---")
+        fund_analyst = FundamentalAnalyst(ticker)
+        fund_report = fund_analyst.run(raw_data['financials'], raw_data['market_data'], raw_data['peer_data'])
+        
+        # 3. Sentiment Analysis
+        logger.info("--- Step 3: Sentiment Analyst ---")
+        sent_analyst = SentimentAnalyst(ticker)
+        sent_report = sent_analyst.run(raw_data['news'], raw_data['market_data'])
+        
+        # 4. Portfolio Manager
+        logger.info("--- Step 4: Portfolio Manager ---")
+        pm = PortfolioManager(ticker)
+        pm_verdict = pm.run(fund_report, sent_report, raw_data['market_data'])
+        
+        # 5. Editor
+        logger.info("--- Step 5: Editor ---")
+        editor = Editor(ticker)
+        sections = {
+            "Financial Deep Dive": fund_report,
+            "Qualitative & Catalyst Analysis": sent_report,
+            "Executive Summary & Investment Verdict": pm_verdict
+        }
+        final_report = editor.run(sections)
+        
+        # Save Results
         safe_ticker = sanitize_filename(ticker)
-        
         base_filename = f"{safe_ticker}-{timestamp_str}"
-        report_path = RESULTS_DIR / f"{base_filename}.txt"
+        report_path = RESULTS_DIR / f"{base_filename}.md" # Changed to .md as it is markdown
         meta_path = RESULTS_DIR / f"{base_filename}.json"
-
-        # Write Report
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(response.content)
         
-        # Write Metadata
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(final_report)
+            
+        # Save Metadata (including intermediate steps for debugging)
         metadata = {
             "ticker": ticker,
             "timestamp": timestamp_str,
-            "model": "grok-4-1-fast-reasoning",
-            "yfinance_data_found": market_data_str is not None,
-            "data_source": "yfinance + web_search" if market_data_str else "web_search_only"
+            "duration_seconds": (datetime.now() - start_time).total_seconds(),
+            "data_source": "yfinance",
+            "intermediate_outputs": {
+                "fundamental_analysis": fund_report,
+                "sentiment_analysis": sent_report,
+                "pm_verdict": pm_verdict
+            },
+             "raw_data_snapshot": raw_data
         }
+        
         with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info(f"Report saved to: {report_path}")
-        logger.info(f"Metadata saved to: {meta_path}")
+            json.dump(metadata, f, indent=2, default=str)
+            
+        logger.info(f"Analysis Complete! Report saved to: {report_path}")
 
     except Exception as e:
-        logger.error(f"Critical error during report generation: {e}")
+        logger.error(f"Critical error in orchestration: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
