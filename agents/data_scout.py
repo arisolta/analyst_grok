@@ -45,12 +45,12 @@ class DataScout:
             return {"error": str(e)}
 
     def get_financials(self) -> dict:
-        """Fetches income statement and balance sheet data."""
+        """Fetches income statement, balance sheet, and cash flow data."""
         logger.info(f"Scouting financials for {self.ticker}...")
         try:
             # yfinance returns DataFrames. converting to string/dict for LLM consumption
             # We limit to last 3 periods to save tokens
-            income_stmt = self.stock.financials.iloc[:, :3].to_string() if not self.stock.financials.empty else "N/A"
+            income_stmt = self.stock.income_stmt.iloc[:, :3].to_string() if not self.stock.income_stmt.empty else "N/A"
             balance_sheet = self.stock.balance_sheet.iloc[:, :3].to_string() if not self.stock.balance_sheet.empty else "N/A"
             cash_flow = self.stock.cashflow.iloc[:, :3].to_string() if not self.stock.cashflow.empty else "N/A"
             
